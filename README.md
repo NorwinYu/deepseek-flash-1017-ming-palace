@@ -17,6 +17,19 @@
 
 这是对明代官式建筑的风格化演绎，并非测绘级或考古级复原。
 
+## 两版对比
+
+同一题目的另一次生成，用的是本地 Maya 服务的 DeepSeek V4.1 Flash，发布于 `local/`：
+
+| | 本版（根目录） | 本地版（`local/`） |
+|---|---|---|
+| 模型 | DeepSeek Flash 1017 | DeepSeek V4.1 Flash（maya） |
+| 日期 | 2026-11-13 | 2026-11-06 |
+| 体积 | 85,402 字节 | 91,195 字节 |
+| 在线 | [本版](https://norwinyu.github.io/deepseek-flash-1017-ming-palace/) | [local/](https://norwinyu.github.io/deepseek-flash-1017-ming-palace/local/) |
+
+并排拖动对比：[中文](https://norwinyu.github.io/blog/two-taihe-halls.html) · [English](https://norwinyu.github.io/en/blog/two-taihe-halls.html)
+
 ## 生成说明
 
 本项目源自一次模型代码生成实验。
