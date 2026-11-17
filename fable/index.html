@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="../favicon.svg" type="image/svg+xml">
+<title>明代宫殿 · Ming Dynasty Palace</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#b9c7d8}
+  body{font-family:"Songti SC","STSong","SimSun","Noto Serif CJK SC","Source Han Serif SC",Georgia,serif;color:#3b1a10}
+  #c{display:block;width:100vw;height:100vh;cursor:grab;touch-action:none;outline:none}
+  #c.drag{cursor:grabbing}
+  .panel{position:fixed;user-select:none;-webkit-user-select:none}
+  #title{left:28px;top:20px;pointer-events:none}
+  #title h1{margin:0;font-size:30px;letter-spacing:.3em;font-weight:700;color:#5c180b;text-shadow:0 1px 0 rgba(255,255,255,.6)}
+  #title p{margin:6px 0 0;font-size:13px;letter-spacing:.1em;color:#4a2416;text-shadow:0 1px 0 rgba(255,255,255,.5)}
+  #title .credit{margin-top:8px;font-size:11px;letter-spacing:.06em;color:#6a4030}
+  #views{right:20px;top:20px;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+  #views button{font:inherit;font-size:13px;letter-spacing:.08em;padding:7px 14px;border:1px solid rgba(92,24,11,.55);border-radius:3px;
+    background:rgba(255,248,232,.78);color:#5c180b;cursor:pointer;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+  #views button:hover{background:rgba(255,248,232,.95)}
+  #views button.on{background:#7a1f10;color:#ffe9b0;border-color:#7a1f10}
+  #hint{left:50%;bottom:18px;transform:translateX(-50%);pointer-events:none;white-space:nowrap;font-size:13px;letter-spacing:.06em;
+    padding:7px 16px;border-radius:3px;background:rgba(40,16,8,.55);color:#ffeecb}
+  #err{display:none;position:fixed;inset:0;align-items:center;justify-content:center;background:#2a120a;color:#ffe9b0;
+    font-size:16px;padding:40px;text-align:center;white-space:pre-wrap}
+  @media (max-width:720px){
+    #title{left:16px;top:14px;right:16px}
+    #title h1{font-size:22px}
+    #title p{font-size:11px;letter-spacing:.06em}
+    #title .credit{font-size:10px;margin-top:6px}
+    #views{top:auto;left:12px;right:12px;bottom:14px;justify-content:center}
+    #views button{font-size:11px;padding:6px 10px}
+    #hint{display:none}
+  }
+</style>
+</head>
+<body>
+<canvas id="c" tabindex="0"></canvas>
+<div id="title" class="panel">
+  <h1>明代宫殿</h1>
+  <p>重檐庑殿 · 黄琉璃瓦 · 汉白玉三台 — Ming Dynasty Palace</p>
+  <p class="credit">Fable 5.2 · 单文件 46 KB · 原生 WebGL2，无外部库</p>
+</div>
+<div id="views" class="panel">
+  <button data-view="front">正面</button>
+  <button data-view="corner">侧角</button>
+  <button data-view="aerial">鸟瞰</button>
+  <button data-view="eaves">檐下</button>
+  <button id="auto" class="on">自动旋转</button>
+</div>
+<div id="hint" class="panel">拖动鼠标旋转视角 · 滚轮缩放 · 右键或 Shift 拖动平移 · 双击复位</div>
+<div id="err"></div>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------- math
+const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const norm=a=>{const l=Math.hypot(a[0],a[1],a[2])||1;return [a[0]/l,a[1]/l,a[2]/l];};
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function persp(fovy,asp,n,f){const t=1/Math.tan(fovy/2),m=new Float32Array(16);
+  m[0]=t/asp;m[5]=t;m[10]=(f+n)/(n-f);m[11]=-1;m[14]=2*f*n/(n-f);return m;}
+function ortho(l,r,b,t,n,f){const m=new Float32Array(16);
+  m[0]=2/(r-l);m[5]=2/(t-b);m[10]=-2/(f-n);m[12]=-(r+l)/(r-l);m[13]=-(t+b)/(t-b);m[14]=-(f+n)/(f-n);m[15]=1;return m;}
+function lookAt(e,c,up){const f=norm(sub(c,e)),s=norm(cross(f,up)),u=cross(s,f),m=new Float32Array(16);
+  m[0]=s[0];m[4]=s[1];m[8]=s[2];m[1]=u[0];m[5]=u[1];m[9]=u[2];m[2]=-f[0];m[6]=-f[1];m[10]=-f[2];
+  m[12]=-dot(s,e);m[13]=-dot(u,e);m[14]=dot(f,e);m[15]=1;return m;}
+function mul(a,b){const o=new Float32Array(16);
+  for(let c=0;c<4;c++)for(let r=0;r<4;r++){let s=0;for(let k=0;k<4;k++)s+=a[k*4+r]*b[c*4+k];o[c*4+r]=s;}return o;}
+
+// ---------------------------------------------------------------- mesh builder
+// Vertex layout: position(3) normal(3) colour(3) u v material = 12 floats.
+const STRIDE=12;
+let VB=new Float32Array(STRIDE*600000),VN=0;
+let TR={c:1,s:0,x:0,y:0,z:0};const TRS=[];
+function push(x,y,z,rot){TRS.push(TR);const c=Math.cos(rot||0),s=Math.sin(rot||0);
+  TR={c:TR.c*c-TR.s*s,s:TR.s*c+TR.c*s,x:TR.x+TR.c*x+TR.s*z,y:TR.y+y,z:TR.z-TR.s*x+TR.c*z};}
+function pop(){TR=TRS.pop();}
+function vtx(p,nx,ny,nz,col,u,v,m){
+  if((VN+1)*STRIDE>VB.length){const b=new Float32Array(VB.length*2);b.set(VB);VB=b;}
+  const o=VN*STRIDE,c=TR.c,s=TR.s;
+  VB[o]=TR.x+c*p[0]+s*p[2];VB[o+1]=TR.y+p[1];VB[o+2]=TR.z-s*p[0]+c*p[2];
+  VB[o+3]=c*nx+s*nz;VB[o+4]=ny;VB[o+5]=-s*nx+c*nz;
+  VB[o+6]=col[0];VB[o+7]=col[1];VB[o+8]=col[2];VB[o+9]=u;VB[o+10]=v;VB[o+11]=m;VN++;
+}
+const ZUV=[[0,0],[0,0],[0,0],[0,0]];
+// `up` forces the winding so the front face looks upward (the roof shader tells
+// top from underside by gl_FrontFacing).
+function quad(a,b,c,d,col,mat,uv,up){
+  let n=cross(sub(b,a),sub(d,a));
+  if(Math.hypot(n[0],n[1],n[2])<1e-10)n=cross(sub(b,a),sub(c,a));
+  n=norm(n);uv=uv||ZUV;mat=mat||0;
+  if(up&&n[1]<0){n=[-n[0],-n[1],-n[2]];const t=b;b=d;d=t;uv=[uv[0],uv[3],uv[2],uv[1]];}
+  vtx(a,n[0],n[1],n[2],col,uv[0][0],uv[0][1],mat);vtx(b,n[0],n[1],n[2],col,uv[1][0],uv[1][1],mat);vtx(c,n[0],n[1],n[2],col,uv[2][0],uv[2][1],mat);
+  vtx(a,n[0],n[1],n[2],col,uv[0][0],uv[0][1],mat);vtx(c,n[0],n[1],n[2],col,uv[2][0],uv[2][1],mat);vtx(d,n[0],n[1],n[2],col,uv[3][0],uv[3][1],mat);
+}
+// vn: normalise v to 0..1 over the box height; su/ou rescale u on the side faces.
+function box(cx,cy,cz,sx,sy,sz,col,mat,vn,su,ou){
+  const x0=cx-sx/2,x1=cx+sx/2,y0=cy-sy/2,y1=cy+sy/2,z0=cz-sz/2,z1=cz+sz/2;
+  const v0=vn?0:y0,v1=vn?1:y1;su=su||1;ou=ou||0;
+  const ux0=(x0+ou)*su,ux1=(x1+ou)*su,uz0=(z0+ou)*su,uz1=(z1+ou)*su;
+  quad([x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1],col,mat,[[ux0,v0],[ux1,v0],[ux1,v1],[ux0,v1]]);
+  quad([x1,y0,z0],[x0,y0,z0],[x0,y1,z0],[x1,y1,z0],col,mat,[[ux1,v0],[ux0,v0],[ux0,v1],[ux1,v1]]);
+  quad([x1,y0,z1],[x1,y0,z0],[x1,y1,z0],[x1,y1,z1],col,mat,[[uz1,v0],[uz0,v0],[uz0,v1],[uz1,v1]]);
+  quad([x0,y0,z0],[x0,y0,z1],[x0,y1,z1],[x0,y1,z0],col,mat,[[uz0,v0],[uz1,v0],[uz1,v1],[uz0,v1]]);
+  quad([x0,y1,z1],[x1,y1,z1],[x1,y1,z0],[x0,y1,z0],col,mat,[[x0,z1],[x1,z1],[x1,z0],[x0,z0]]);
+  quad([x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1],col,mat,[[x0,z0],[x1,z0],[x1,z1],[x0,z1]]);
+}
+function hexa(p,col,mat){
+  quad(p[0],p[1],p[2],p[3],col,mat);quad(p[4],p[5],p[6],p[7],col,mat);
+  for(let i=0;i<4;i++){const j=(i+1)%4;quad(p[i],p[j],p[j+4],p[i+4],col,mat);}
+}
+function cyl(cx,y0,cz,r0,r1,h,seg,col,mat,cap){
+  const ny=(r0-r1)/h,l=Math.hypot(1,ny);mat=mat||0;
+  for(let i=0;i<seg;i++){
+    const a0=i/seg*2*Math.PI,a1=(i+1)/seg*2*Math.PI,c0=Math.cos(a0),s0=Math.sin(a0),c1=Math.cos(a1),s1=Math.sin(a1);
+    const p00=[cx+r0*c0,y0,cz+r0*s0],p10=[cx+r0*c1,y0,cz+r0*s1],p11=[cx+r1*c1,y0+h,cz+r1*s1],p01=[cx+r1*c0,y0+h,cz+r1*s0];
+    vtx(p00,c0/l,ny/l,s0/l,col,0,0,mat);vtx(p10,c1/l,ny/l,s1/l,col,0,0,mat);vtx(p11,c1/l,ny/l,s1/l,col,0,0,mat);
+    vtx(p00,c0/l,ny/l,s0/l,col,0,0,mat);vtx(p11,c1/l,ny/l,s1/l,col,0,0,mat);vtx(p01,c0/l,ny/l,s0/l,col,0,0,mat);
+    if(cap!==false&&r1>0.02){const t=[cx,y0+h,cz];vtx(t,0,1,0,col,0,0,mat);vtx(p01,0,1,0,col,0,0,mat);vtx(p11,0,1,0,col,0,0,mat);}
+  }
+}
+// Smooth parametric sheet. With `up`, triangles are wound so the upward side is the front face.
+function surface(P,us,ts,col,mat,UV,up){
+  const nu=us.length,nt=ts.length,pts=[],nr=new Float64Array(nu*nt*3);let sy=0;
+  for(let j=0;j<nt;j++)for(let i=0;i<nu;i++)pts.push(P(us[i],ts[j]));
+  for(let j=0;j<nt-1;j++)for(let i=0;i<nu-1;i++){
+    const ia=j*nu+i,ib=ia+1,ic=ia+nu+1,id=ia+nu,n=cross(sub(pts[ic],pts[ia]),sub(pts[id],pts[ib]));
+    for(const k of [ia,ib,ic,id]){nr[k*3]+=n[0];nr[k*3+1]+=n[1];nr[k*3+2]+=n[2];}
+    sy+=n[1];
+  }
+  const flip=up&&sy<0,sg=flip?-1:1;
+  const emit=(k,i,j)=>{let x=nr[k*3],y=nr[k*3+1],z=nr[k*3+2];const l=Math.hypot(x,y,z);
+    if(l<1e-12){x=0;y=1;z=0;}else{x*=sg/l;y*=sg/l;z*=sg/l;}
+    const uv=UV?UV(us[i],ts[j]):[0,0];vtx(pts[k],x,y,z,col,uv[0],uv[1],mat);};
+  for(let j=0;j<nt-1;j++)for(let i=0;i<nu-1;i++){
+    const A=[j*nu+i,i,j],B=[j*nu+i+1,i+1,j],C=[(j+1)*nu+i+1,i+1,j+1],D=[(j+1)*nu+i,i,j+1];
+    const order=flip?[A,C,B,A,D,C]:[A,B,C,A,C,D];
+    for(const q of order)emit(q[0],q[1],q[2]);
+  }
+}
+// Rectangular section swept along a polyline. Without `side` the section stays upright.
+function sweep(pts,w,h0,h1,col,mat,side){
+  const n=pts.length,rings=[],val=(f,t)=>typeof f==='function'?f(t):f;
+  for(let i=0;i<n;i++){
+    const t=norm(sub(pts[Math.min(n-1,i+1)],pts[Math.max(0,i-1)]));
+    const s=side||norm([-t[2],0,t[0]]);let nn=norm(cross(s,t));
+    if(!side&&nn[1]<0)nn=[-nn[0],-nn[1],-nn[2]];
+    const f=i/(n-1),ww=val(w,f)/2,a0=val(h0,f),a1=val(h1,f),p=pts[i];
+    const at=(k,a)=>[p[0]+s[0]*k+nn[0]*a,p[1]+s[1]*k+nn[1]*a,p[2]+s[2]*k+nn[2]*a];
+    rings.push([at(-ww,a0),at(ww,a0),at(ww,a1),at(-ww,a1)]);
+  }
+  for(let i=0;i<n-1;i++)for(let k=0;k<4;k++){const j=(k+1)%4;quad(rings[i][k],rings[i][j],rings[i+1][j],rings[i+1][k],col,mat);}
+  quad(rings[0][0],rings[0][1],rings[0][2],rings[0][3],col,mat);
+  quad(rings[n-1][0],rings[n-1][1],rings[n-1][2],rings[n-1][3],col,mat);
+}
+
+// ---------------------------------------------------------------- palette (sRGB) and material ids
+const TILE=[0.93,0.65,0.13],RIDGE=[0.86,0.55,0.10],RED=[0.63,0.12,0.08],COLRED=[0.57,0.08,0.05],
+  MARBLE=[0.87,0.86,0.82],MARBLE2=[0.76,0.75,0.71],STONE=[0.56,0.54,0.51],PAVE=[0.57,0.55,0.52],
+  CEIL=[0.10,0.26,0.24],GOLD=[0.88,0.64,0.20],BRONZE=[0.33,0.25,0.14],GRASS=[0.38,0.44,0.27],
+  BARK=[0.30,0.22,0.15],WHITE=[1,1,1],GABLE=[0.60,0.11,0.07];
+const M_PLAIN=0,M_TILE=1,M_MARBLE=2,M_PAVE=3,M_BEAM=4,M_DOUGONG=5,M_DOOR=6,M_TILEEND=7,M_PLAQUE=8,
+  M_GOLD=9,M_GATE=10,M_GRASS=11,M_LEAF=12,M_GLAZE=13,M_CARVED=14;
+
+// ---------------------------------------------------------------- stonework
+// Sumeru-style pedestal (须弥座): plinth, recessed waist, cornice.
+function xumi(x0,x1,z0,z1,y0,h){
+  const cx=(x0+x1)/2,cz=(z0+z1)/2,sx=x1-x0,sz=z1-z0,hb=h*0.22,ht=h*0.24,hm=h-hb-ht,r=0.24,m=h*0.07;
+  box(cx,y0+hb/2,cz,sx,hb,sz,MARBLE,M_MARBLE);
+  box(cx,y0+hb+m/2,cz,sx-r,m,sz-r,MARBLE,M_MARBLE);
+  box(cx,y0+hb+hm/2,cz,sx-2*r,hm,sz-2*r,MARBLE2,M_MARBLE);
+  box(cx,y0+hb+hm-m/2,cz,sx-r,m,sz-r,MARBLE,M_MARBLE);
+  box(cx,y0+h-ht/2,cz,sx,ht,sz,MARBLE,M_MARBLE);
+}
+function slab(sx,sy,sz,ex,ey,ez,h0,h1,th){
+  const dx=ex-sx,dz=ez-sz,L=Math.hypot(dx,dz),px=-dz/L*th/2,pz=dx/L*th/2;
+  hexa([[sx-px,sy+h0,sz-pz],[ex-px,ey+h0,ez-pz],[ex+px,ey+h0,ez+pz],[sx+px,sy+h0,sz+pz],
+        [sx-px,sy+h1,sz-pz],[ex-px,ey+h1,ez-pz],[ex+px,ey+h1,ez+pz],[sx+px,sy+h1,sz+pz]],MARBLE,M_MARBLE);
+}
+// Marble balustrade from a to b (may slope). `sp` = outward direction for dragon-head spouts.
+function balu(ax,ay,az,bx,by,bz,sp){
+  const dx=bx-ax,dz=bz-az,L=Math.hypot(dx,dz);if(L<0.6)return;
+  const n=Math.max(1,Math.round(L/2.1)),ux=dx/L,uz=dz/L,PW=0.26,PH=1.3;
+  for(let i=0;i<=n;i++){
+    const f=i/n,x=ax+dx*f,z=az+dz*f,y=ay+(by-ay)*f;
+    box(x,y+PH/2,z,PW,PH,PW,MARBLE,M_MARBLE);
+    cyl(x,y+PH,z,0.17,0.08,0.34,6,MARBLE,M_MARBLE);
+    if(sp)box(x+sp[0]*0.6,y-0.3,z+sp[1]*0.6,0.2+Math.abs(sp[0])*0.6,0.2,0.2+Math.abs(sp[1])*0.6,MARBLE,M_MARBLE);
+    if(i<n){
+      const f1=(i+1)/n,x1=ax+dx*f1,z1=az+dz*f1,y1=ay+(by-ay)*f1;
+      const sx=x+ux*PW/2,sz=z+uz*PW/2,ex=x1-ux*PW/2,ez=z1-uz*PW/2,mx=(sx+ex)/2,mz=(sz+ez)/2,my=(y+y1)/2,k=0.16;
+      slab(sx,y,sz,ex,y1,ez,0.08,0.56,0.12);
+      slab(sx,y,sz,ex,y1,ez,0.80,0.95,0.16);
+      slab(mx-ux*k,my-(y1-y)*0.06,mz-uz*k,mx+ux*k,my+(y1-y)*0.06,mz+uz*k,0.56,0.80,0.10);
+    }
+  }
+}
+// Closed balustrade outline with gaps where it meets `cuts` rectangles [x0,x1,z0,z1].
+function baluLoop(pts,y,cuts,spout){
+  for(let i=0;i<pts.length;i++){
+    const a=pts[i],b=pts[(i+1)%pts.length],dx=b[0]-a[0],dz=b[1]-a[1],L=Math.hypot(dx,dz),ux=dx/L,uz=dz/L,iv=[];
+    for(const c of cuts){
+      let s0=0,s1=L,ok=true;
+      for(const [p,u,lo,hi] of [[a[0],ux,c[0],c[1]],[a[1],uz,c[2],c[3]]]){
+        if(Math.abs(u)<1e-9){if(p<lo||p>hi)ok=false;}
+        else{let t0=(lo-p)/u,t1=(hi-p)/u;if(t0>t1){const t=t0;t0=t1;t1=t;}s0=Math.max(s0,t0);s1=Math.min(s1,t1);}
+      }
+      if(ok&&s1>s0)iv.push([s0,s1]);
+    }
+    iv.sort((p,q)=>p[0]-q[0]);
+    let cur=0;const segs=[];
+    for(const [s0,s1] of iv){if(s0>cur)segs.push([cur,s0]);cur=Math.max(cur,s1);}
+    if(cur<L)segs.push([cur,L]);
+    for(const [s0,s1] of segs)if(s1-s0>0.8)
+      balu(a[0]+ux*s0,y,a[1]+uz*s0,a[0]+ux*s1,y,a[1]+uz*s1,spout?[uz,-ux]:null);
+  }
+}
+// Flight of steps descending from (cx,yTop,cz) toward local +z; `ramp` adds a carved imperial ramp.
+function stairs(cx,yTop,cz,rot,w,rise,run,ramp){
+  push(cx,yTop,cz,rot);
+  const n=Math.max(2,Math.round(rise/0.2)),h=rise/n,d=run/n,bw=0.55,secs=[],beams=[w/2-bw/2,-(w/2-bw/2)];
+  if(ramp){
+    const rw=Math.min(w*0.28,6);
+    secs.push([-w/2+bw,-rw/2-bw],[rw/2+bw,w/2-bw]);beams.push(rw/2+bw/2,-rw/2-bw/2);
+    quad([-rw/2,0.03,0],[rw/2,0.03,0],[rw/2,-rise+0.03,run],[-rw/2,-rise+0.03,run],MARBLE2,M_CARVED,
+      [[-rw/2,0],[rw/2,0],[rw/2,run*1.1],[-rw/2,run*1.1]]);
+  }else secs.push([-w/2+bw,w/2-bw]);
+  for(const [x0,x1] of secs)for(let k=1;k<n;k++)
+    box((x0+x1)/2,-(rise+k*h)/2,(k-0.5)*d,x1-x0,rise-k*h,d,MARBLE,M_MARBLE);
+  for(const x of beams){const a=x-bw/2,b=x+bw/2;
+    hexa([[a,-rise,0],[b,-rise,0],[b,-rise,run],[a,-rise,run],[a,0.1,0],[b,0.1,0],[b,-rise+0.1,run],[a,-rise+0.1,run]],MARBLE,M_MARBLE);}
+  if(rise>=1.6)for(const x of [w/2-bw/2,-(w/2-bw/2)])
+    balu(x,0.1-rise*0.3/run,0.3,x,0.1-rise*(run-0.1)/run,run-0.1,null);
+  pop();
+}
+
+// ---------------------------------------------------------------- roofs
+const prof=(t,a,p)=>a*t+(1-a)*Math.pow(t,p);   // concave roof section (举折), 0..1 -> 0..1
+
+// Ridge-end dragon ornament (正吻): body biting the ridge, tail curling outward.
+function wen(x,y,dir,s){
+  push(x,y,0,dir>0?0:Math.PI);
+  hexa([[-1.15*s,0,-0.42*s],[0.4*s,0,-0.42*s],[0.4*s,0,0.42*s],[-1.15*s,0,0.42*s],
+        [-0.8*s,1.9*s,-0.36*s],[0.3*s,1.9*s,-0.36*s],[0.3*s,1.9*s,0.36*s],[-0.8*s,1.9*s,0.36*s]],RIDGE,M_GLAZE);
+  const pts=[[-0.55*s,1.4*s,0]],cx=0.05*s,cy=2.2*s;
+  for(let i=0;i<=12;i++){const f=i/12,th=Math.PI-f*Math.PI*1.2,r=(0.62-0.34*f)*s;pts.push([cx+r*Math.cos(th),cy+r*Math.sin(th)*1.15,0]);}
+  sweep(pts,f=>(0.72-0.34*f)*s,f=>-(0.36-0.22*f)*s,f=>(0.36-0.22*f)*s,RIDGE,M_GLAZE,[0,0,1]);
+  pop();
+}
+// Gilded finial (宝顶) for pyramidal roofs.
+function finial(x,y,z,s){
+  const rs=[0.95,0.75,0.5,0.9,1.05,0.9,0.5,0.14],hs=[0.35,0.3,0.3,0.3,0.3,0.3,0.25];let yy=y;
+  for(let i=0;i<hs.length;i++){cyl(x,yy,z,rs[i]*s,rs[i+1]*s,hs[i]*s,12,GOLD,M_GOLD,false);yy+=hs[i]*s;}
+  cyl(x,yy,z,0.14*s,0.02,0.9*s,8,GOLD,M_GOLD,false);
+}
+// One curved tile roof. Covers hip roofs (庑殿), hip-and-gable roofs (歇山, tHip<1),
+// pyramidal roofs (攒尖, W==D) and the lower skirt of double eaves (ring).
+//   W,D   half extents at the eave        Rx,Rz  horizontal run from eave to top
+//   H     rise over the run               y0     eave height
+//   tHip  where the end slopes stop       lift   corner upturn, eased over cl metres
+function roof(o){
+  const W=o.W,D=o.D,Rx=o.Rx,Rz=o.Rz,H=o.H,y0=o.y0,a=o.a,p=o.p,s=o.s||1,lift=o.lift,cl=o.cl;
+  const tHip=o.tHip==null?1:o.tHip,tl=Math.min(1.3*cl/Rz,tHip);
+  const xh=t=>W-Rx*Math.min(t,tHip),zh=t=>D-Rz*t,yy=t=>y0+H*prof(t,a,p);
+  const lf=(d,t)=>{const w=Math.max(0,1-d/cl),q=Math.max(0,1-t/tl);return lift*w*w*q*q;};
+  const SL=Math.hypot(Rz,H),NT=16,EH=0.34*s,tsHip=[];
+  const n1=Math.max(5,Math.round(NT*tHip));
+  for(let i=0;i<=n1;i++)tsHip.push(tHip*i/n1);
+  const tsAll=tsHip.slice();
+  if(tHip<1){const n2=Math.max(6,NT-n1);for(let i=1;i<=n2;i++)tsAll.push(tHip+(1-tHip)*i/n2);}
+  // Dense samples near the corners, where the eave curls up.
+  const usFor=h=>{const zf=Math.min(1,cl/h),nc=10,us=[];
+    if(zf>=1){for(let i=0;i<=2*nc;i++)us.push(-1+i/nc);return us;}
+    for(let i=0;i<nc;i++)us.push(-1+zf*i/nc);
+    const nm=Math.max(2,Math.ceil((2-2*zf)*h/5));
+    for(let i=0;i<=nm;i++)us.push(-1+zf+(2-2*zf)*i/nm);
+    for(let i=1;i<=nc;i++)us.push(1-zf+zf*i/nc);
+    return us;};
+  for(const g of [1,-1]){
+    const us=usFor(W),P=(u,t)=>[u*xh(t),yy(t)+lf((1-Math.abs(u))*xh(t),t),g*zh(t)];
+    surface(P,us,tsAll,TILE,M_TILE,(u,t)=>[u*xh(t),t*SL],true);
+    surface((u,v)=>{const q=P(u,0);return [q[0],q[1]-EH*v,q[2]];},us,[0,1],TILE,M_TILEEND,(u,v)=>[u*W,v]);
+  }
+  for(const g of [1,-1]){
+    const us=usFor(D),P=(u,t)=>[g*xh(t),yy(t)+lf((1-Math.abs(u))*zh(t),t),u*zh(t)];
+    surface(P,us,tsHip,TILE,M_TILE,(u,t)=>[u*zh(t),t*SL],true);
+    surface((u,v)=>{const q=P(u,0);return [q[0],q[1]-EH*v,q[2]];},us,[0,1],TILE,M_TILEEND,(u,v)=>[u*D,v]);
+  }
+  // Hip ridges with their row of small beasts.
+  const nb=o.beasts||0,dt=0.95*s/Math.hypot(Rx,Rz);
+  for(const gx of [1,-1])for(const gz of [1,-1]){
+    const pts=tsHip.map(t=>[gx*xh(t),yy(t)+lf(0,t),gz*zh(t)]);
+    const e=norm(sub(pts[0],pts[1]));
+    pts.unshift([pts[0][0]+e[0]*0.5*s,pts[0][1]+e[1]*0.5*s+0.18*s,pts[0][2]+e[2]*0.5*s]);
+    sweep(pts,0.55*s,-0.15*s,0.5*s,RIDGE,M_GLAZE);
+    for(let k=0;k<=nb;k++){
+      const t=(1.3+k)*dt;if(t>tHip*0.8)break;
+      const q=[gx*xh(t),yy(t)+lf(0,t)+0.46*s,gz*zh(t)];
+      if(k<nb)cyl(q[0],q[1],q[2],0.17*s,0.04*s,0.62*s,5,RIDGE,M_GLAZE,false);
+      else box(q[0],q[1]+0.35*s,q[2],0.5*s,0.95*s,0.5*s,RIDGE,M_GLAZE);
+    }
+  }
+  if(tHip<1){
+    // Gable ends of a hip-and-gable roof.
+    const xg=xh(1),xw=xg-0.8*s,tsG=tsAll.filter(t=>t>=tHip-1e-9),yb=yy(tHip),zb=zh(tHip);
+    for(const gx of [1,-1]){
+      for(let i=0;i<tsG.length-1;i++){
+        const t0=tsG[i],t1=tsG[i+1],ya=yy(t0)-0.05,yc=yy(t1)-0.05;
+        quad([gx*xw,ya,zh(t0)],[gx*xw,ya,-zh(t0)],[gx*xw,yc,-zh(t1)],[gx*xw,yc,zh(t1)],GABLE,M_PLAIN);
+        for(const gz of [1,-1])
+          quad([gx*xg,yy(t0),gz*zh(t0)],[gx*xg,yy(t1),gz*zh(t1)],[gx*xg,yy(t1)-0.75*s,gz*zh(t1)],[gx*xg,yy(t0)-0.75*s,gz*zh(t0)],COLRED,M_PLAIN);
+      }
+      box(gx*(xw+xg)/2-gx*0.1,yb+0.05*s,0,xg-xw+0.2,0.7*s,2*zb,RIDGE,M_GLAZE);
+      for(const gz of [1,-1])
+        sweep(tsG.map(t=>[gx*(xg-0.3*s),yy(t),gz*zh(t)]),0.5*s,-0.12*s,0.45*s,RIDGE,M_GLAZE);
+    }
+  }
+  const L=xh(1),yt=yy(1);
+  if(o.ring){
+    const hx=W-Rx,hz=D-Rz;
+    for(const g of [1,-1]){
+      box(0,yt+0.2*s,g*(hz+0.2),2*hx+0.8,0.75*s,0.4,RIDGE,M_GLAZE);
+      box(g*(hx+0.2),yt+0.2*s,0,0.4,0.75*s,2*hz+0.8,RIDGE,M_GLAZE);
+      for(const gz of [1,-1])box(g*(hx+0.25),yt+0.45*s,gz*(hz+0.25),0.6*s,1.2*s,0.6*s,RIDGE,M_GLAZE);
+    }
+  }else if(L>0.5){
+    box(0,yt+0.3*s,0,2*L+0.3*s,1.1*s,0.7*s,RIDGE,M_GLAZE);
+    box(0,yt+0.9*s,0,2*L-1.6*s,0.16*s,0.9*s,RIDGE,M_GLAZE);
+    wen(L,yt+0.1*s,1,s*1.2);wen(-L,yt+0.1*s,-1,s*1.2);
+  }else finial(0,yt-0.35*s,0,s);
+}
+
+// ---------------------------------------------------------------- timber halls
+function doorPanel(a0,a1,y0,y1,c,mat,axis,leaves){
+  const w=a1-a0,n=leaves||Math.max(2,Math.round(w/1.1)),hgt=y1-y0,col=[hgt,w/n,0],uv=[[0,0],[n,0],[n,hgt],[0,hgt]];
+  if(axis==='x')quad([a0,y0,c],[a1,y0,c],[a1,y1,c],[a0,y1,c],col,mat,uv);
+  else quad([c,y0,a0],[c,y0,a1],[c,y1,a1],[c,y1,a0],col,mat,uv);
+}
+// Painted band (beam or bracket set) wrapped round a rectangle; flares from o0 to o1.
+function bandRing(hx,hz,y0,y1,o0,o1,mat,px,pz,off){
+  const A=(x,z,o,y)=>[x+Math.sign(x)*o,y,z+Math.sign(z)*o],ex=2*hx/px+off,ez=2*hz/pz+off;
+  for(const g of [1,-1]){
+    quad(A(-hx,g*hz,o0,y0),A(hx,g*hz,o0,y0),A(hx,g*hz,o1,y1),A(-hx,g*hz,o1,y1),WHITE,mat,[[off,0],[ex,0],[ex,1],[off,1]]);
+    quad(A(g*hx,-hz,o0,y0),A(g*hx,hz,o0,y0),A(g*hx,hz,o1,y1),A(g*hx,-hz,o1,y1),WHITE,mat,[[off,0],[ez,0],[ez,1],[off,1]]);
+  }
+}
+function wallBay(cx,cz,sx,sz,top){
+  const thin=sx<sz;
+  box(cx,0.55,cz,sx+(thin?0.1:0),1.1,sz+(thin?0:0.1),STONE,M_PLAIN);
+  box(cx,(1.1+top)/2,cz,sx,top-1.1,sz,RED,M_PLAIN);
+}
+// A timber-framed hall on its platform: column grid, walls and doors, painted beams,
+// bracket sets, then a single or double-eaved roof.
+function hall(o){
+  const nx=o.nx,nz=o.nz,bx=o.bx,bz=o.bz,hw=nx*bx/2,hd=nz*bz/2,s=o.s||1;
+  const r=o.colR,colH=o.colH,beamH=0.85*s,dgH=1.0*s,DO=0.7*s;
+  const ph=o.platH,pe=o.platExt,PX=hw+pe,PZ=hd+pe;
+  push(o.x,o.y||0,o.z,o.rot||0);
+  if(o.xumi)xumi(-PX,PX,-PZ,PZ,0,ph);else box(0,ph/2,0,2*PX,ph,2*PZ,MARBLE,M_MARBLE);
+  const cuts=(o.cuts||[]).slice();
+  for(const st of o.stairs||[]){
+    const w=st.w,run=st.run||ph*2.1,c=st.c||0;
+    if(st.side==='f'){stairs(c,ph,PZ,0,w,ph,run,st.ramp);cuts.push([c-w/2,c+w/2,PZ-1,PZ+1]);}
+    else if(st.side==='b'){stairs(c,ph,-PZ,Math.PI,w,ph,run,st.ramp);cuts.push([c-w/2,c+w/2,-PZ-1,-PZ+1]);}
+    else if(st.side==='r'){stairs(PX,ph,c,Math.PI/2,w,ph,run,st.ramp);cuts.push([PX-1,PX+1,c-w/2,c+w/2]);}
+    else{stairs(-PX,ph,c,-Math.PI/2,w,ph,run,st.ramp);cuts.push([-PX-1,-PX+1,c-w/2,c+w/2]);}
+  }
+  if(o.balu){const e=0.32;baluLoop([[-PX+e,-PZ+e],[PX-e,-PZ+e],[PX-e,PZ-e],[-PX+e,PZ-e]],ph,cuts,true);}
+  push(0,ph,0,0);
+
+  const X=i=>-hw+i*bx,Z=j=>-hd+j*bz;
+  const pf=o.porchF||0,pb=o.porchB||0,ps=o.porchS||0,il=ps,ir=nx-ps,jb=pb,jf=nz-pf,jm=nz/2;
+  for(let i=0;i<=nx;i++)for(let j=0;j<=nz;j++){
+    const edge=i===0||i===nx||j===0||j===nz;
+    const onWall=o.gate?j===jm:(((i===il||i===ir)&&j>=jb&&j<=jf)||((j===jb||j===jf)&&i>=il&&i<=ir));
+    if(!edge&&!onWall)continue;
+    cyl(X(i),0,Z(j),r*1.55,r*1.25,0.24,12,MARBLE,M_MARBLE);
+    cyl(X(i),0.24,Z(j),r,r*0.93,colH-0.24,14,COLRED,M_PLAIN,false);
+  }
+  const topF=pf?colH:colH-beamH,topB=pb?colH:colH-beamH,topS=ps?colH:colH-beamH;
+  if(o.gate){
+    const gd=o.gateDoors||3,i0=(nx-gd)/2;
+    for(let i=0;i<nx;i++){
+      if(i>=i0&&i<i0+gd)doorPanel(X(i)+r,X(i+1)-r,0,colH,Z(jm),M_GATE,'x',2);
+      else wallBay((X(i)+X(i+1))/2,Z(jm),bx,0.44,colH);
+    }
+    for(const g of [-1,1])wallBay(g*hw,0,0.44,2*hd,colH-beamH);
+  }else{
+    for(let i=il;i<ir;i++){
+      doorPanel(X(i)+r,X(i+1)-r,0,topF,Z(jf),M_DOOR,'x');
+      if(o.doorsAll||(o.backDoor&&i===(nx-1)/2))doorPanel(X(i)+r,X(i+1)-r,0,topB,Z(jb),M_DOOR,'x');
+      else wallBay((X(i)+X(i+1))/2,Z(jb),bx,0.44,topB);
+    }
+    for(let j=jb;j<jf;j++)for(const i of [il,ir]){
+      if(o.doorsAll)doorPanel(Z(j)+r,Z(j+1)-r,0,topS,X(i),M_DOOR,'z');
+      else wallBay(X(i),(Z(j)+Z(j+1))/2,0.44,bz,topS);
+    }
+  }
+  // Painted architrave on the outer colonnade, ceiling, then the bracket band.
+  for(const g of [1,-1]){
+    box(0,colH-beamH/2,g*hd,2*hw+0.5,beamH,0.5,WHITE,M_BEAM,true,1/bx,hw);
+    box(g*hw,colH-beamH/2,0,0.5,beamH,2*hd+0.5,WHITE,M_BEAM,true,1/bz,hd);
+  }
+  box(0,colH+0.05,0,2*hw+0.5,0.1,2*hd+0.5,CEIL,M_PLAIN);
+  const d1=colH+dgH,per=(len,b)=>len/Math.max(1,Math.round(len/b));
+  bandRing(hw,hd,colH,d1,0.25,DO,M_DOUGONG,bx/Math.max(1,Math.round(bx/s)),bz/Math.max(1,Math.round(bz/s)),0.5);
+
+  const topRoof=(hx,hz,dg)=>{
+    const ov=o.ov2,W=hx+ov,D=hz+ov,a=0.32,p=2.3,H=o.slope*D;
+    roof({W,D,Rz:D,Rx:o.type==='hip'?D*0.88:D,H,a,p,s,y0:dg+0.08-H*prof((ov-DO)/D,a,p),
+      tHip:o.type==='xie'?0.42:1,lift:o.lift,cl:Math.min(0.55*D,7*s),beasts:o.beasts});
+  };
+  if(o.double){
+    // Lower eave: a skirt roof running up to the inset upper storey.
+    const ov=o.ov1,ins=o.ins,R=ov+ins,H1=0.5*R,a1=0.55,p1=2,y0=d1+0.08-H1*prof((ov-DO)/R,a1,p1);
+    roof({W:hw+ov,D:hd+ov,Rx:R,Rz:R,H:H1,y0,a:a1,p:p1,s,lift:o.lift,cl:Math.min(0.55*(hd+ov),7*s),ring:true,beasts:o.beasts});
+    const yt=y0+H1,c2=yt+0.9*s+beamH,d2=c2+dgH,hx=hw-ins,hz=hd-ins;
+    box(0,(colH+c2)/2,0,2*hx,c2-colH,2*hz,RED,M_PLAIN);
+    bandRing(hx,hz,c2-beamH,c2,0.06,0.06,M_BEAM,per(2*hx,bx),per(2*hz,bz),0);
+    bandRing(hx,hz,c2,d2,0.06,DO,M_DOUGONG,per(2*hx,s),per(2*hz,s),0.5);
+    box(0,d2-0.06,0,2*(hx+DO),0.1,2*(hz+DO),CEIL,M_PLAIN);
+    topRoof(hx,hz,d2);
+    if(o.plaque){const h=(dgH+beamH)*1.05,w=h*0.62,yc=c2-beamH*0.25+dgH*0.25,z=hz+DO*0.75;
+      quad([-w/2,yc-h/2,z],[w/2,yc-h/2,z],[w/2,yc+h/2,z+0.3],[-w/2,yc+h/2,z+0.3],WHITE,M_PLAQUE,[[0,0],[1,0],[1,1],[0,1]]);}
+  }else{
+    topRoof(hw,hd,d1);
+    if(o.plaque){const h=(dgH+beamH)*1.0,w=h*0.62,yc=colH-beamH*0.25+dgH*0.25,z=hd+DO*0.75;
+      quad([-w/2,yc-h/2,z],[w/2,yc-h/2,z],[w/2,yc+h/2,z+0.3],[-w/2,yc+h/2,z+0.3],WHITE,M_PLAQUE,[[0,0],[1,0],[1,1],[0,1]]);}
+  }
+  pop();pop();
+}
+
+// ---------------------------------------------------------------- walls, trees, bronzes
+function wall(x0,z0,x1,z1,h,th){
+  const dx=x1-x0,dz=z1-z0,L=Math.hypot(dx,dz);
+  push((x0+x1)/2,0,(z0+z1)/2,Math.atan2(-dz,dx));
+  box(0,0.6,0,L,1.2,th+0.3,STONE,M_PLAIN);
+  box(0,(1.2+h)/2,0,L,h-1.2,th,RED,M_PLAIN);
+  box(0,h+0.15,0,L,0.3,th+0.5,RIDGE,M_GLAZE);
+  const e=th/2+0.6,yr=h+1.15,ye=h+0.3;
+  for(const g of [1,-1]){
+    quad([-L/2,ye,g*e],[L/2,ye,g*e],[L/2,yr,0],[-L/2,yr,0],TILE,M_TILE,[[-L/2,0],[L/2,0],[L/2,1.3],[-L/2,1.3]],true);
+    quad([-L/2,ye,g*e],[L/2,ye,g*e],[L/2,ye-0.22,g*e],[-L/2,ye-0.22,g*e],TILE,M_TILEEND,[[-L/2,0],[L/2,0],[L/2,1],[-L/2,1]]);
+  }
+  box(0,yr+0.05,0,L,0.36,0.36,RIDGE,M_GLAZE);
+  pop();
+}
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function tree(x,z,h,rw,g){
+  cyl(x,0,z,0.34*rw,0.22*rw,h*0.42,6,BARK,M_PLAIN,false);
+  for(let k=0;k<3;k++)cyl(x,h*(0.22+0.24*k),z,rw*2.7*(1-0.27*k),0.05,h*0.42,7,g,M_LEAF,false);
+}
+function censer(x,y,z){
+  box(x,y+0.12,z,2.0,0.24,2.0,MARBLE,M_MARBLE);box(x,y+0.6,z,1.5,0.75,1.5,MARBLE2,M_MARBLE);box(x,y+1.05,z,1.8,0.2,1.8,MARBLE,M_MARBLE);
+  cyl(x,y+1.15,z,0.35,0.62,0.45,10,BRONZE,M_GLAZE);cyl(x,y+1.6,z,0.62,0.68,0.6,10,BRONZE,M_GLAZE);
+  cyl(x,y+2.2,z,0.8,0.22,0.5,10,BRONZE,M_GLAZE);cyl(x,y+2.7,z,0.22,0.02,0.45,8,BRONZE,M_GLAZE,false);
+}
+function vat(x,y,z){
+  box(x,y+0.15,z,1.7,0.3,1.7,MARBLE,M_MARBLE);
+  cyl(x,y+0.3,z,0.62,1.0,0.5,16,GOLD,M_GOLD,false);cyl(x,y+0.8,z,1.0,0.9,0.55,16,GOLD,M_GOLD,false);cyl(x,y+1.35,z,0.98,0.98,0.1,16,GOLD,M_GOLD);
+}
+
+// ---------------------------------------------------------------- the palace
+function buildScene(){
+  const XW=104,ZWN=-146,ZWS=120,G=6000;
+  quad([-G,-0.06,-G],[G,-0.06,-G],[G,-0.06,G],[-G,-0.06,G],GRASS,M_GRASS);
+  quad([-XW-10,0,ZWN-18],[XW+10,0,ZWN-18],[XW+10,0,ZWS+22],[-XW-10,0,ZWS+22],PAVE,M_PAVE);
+  quad([-11,0,ZWS+22],[11,0,ZWS+22],[11,0,900],[-11,0,900],PAVE,M_PAVE);
+  quad([-3.5,0.04,47],[3.5,0.04,47],[3.5,0.04,105.5],[-3.5,0.04,105.5],MARBLE2,M_MARBLE);
+
+  // Three-tiered marble terrace (三台) with a projecting front platform (月台).
+  const TA=58,TB=40,ZN=-116,ZS=12,ZP=42,TH=2.4,TI=6;
+  for(let k=0;k<3;k++){
+    const d=TI*k,y0=TH*k,y1=y0+TH,cuts=[],e=0.35;
+    xumi(-TA+d,TA-d,ZN+d,ZS-d,y0,TH);
+    xumi(-TB+d,TB-d,ZS-d-3,ZP-d,y0,TH);
+    const st=(x,z,rot,w,ramp)=>{stairs(x,y1,z,rot,w,TH,5,ramp);
+      cuts.push(Math.abs(Math.sin(rot))>0.5?[x-1,x+1,z-w/2,z+w/2]:[x-w/2,x+w/2,z-1,z+1]);};
+    st(0,ZP-d,0,24,true);st(0,ZN+d,Math.PI,16,true);
+    st(TB-d,21,Math.PI/2,9,false);st(-TB+d,21,-Math.PI/2,9,false);
+    st(TA-d,-60,Math.PI/2,9,false);st(-TA+d,-60,-Math.PI/2,9,false);
+    baluLoop([[-TA+d+e,ZN+d+e],[TA-d-e,ZN+d+e],[TA-d-e,ZS-d-e],[TB-d-e,ZS-d-e],[TB-d-e,ZP-d-e],
+      [-TB+d+e,ZP-d-e],[-TB+d+e,ZS-d-e],[-TA+d+e,ZS-d-e]],y1,cuts,true);
+  }
+  const TY=3*TH;
+
+  // Main hall: eleven bays, double-eaved hip roof — the highest rank of roof.
+  hall({x:0,y:TY,z:-22,nx:11,nz:5,bx:5,bz:5.5,colR:0.46,colH:7.6,platH:1.0,platExt:2.6,
+    stairs:[{side:'f',w:16},{side:'b',w:8}],porchF:1,backDoor:true,double:true,ov1:3.6,ins:5.5,ov2:4.0,
+    type:'hip',slope:0.68,lift:1.3,s:1,beasts:7,plaque:true});
+  // Middle hall: square pavilion with a pyramidal roof and gilded finial.
+  hall({x:0,y:TY,z:-58,nx:5,nz:5,bx:3.4,bz:3.4,colR:0.3,colH:5.2,platH:0.8,platExt:2.0,
+    stairs:[{side:'f',w:5},{side:'b',w:5},{side:'l',w:5},{side:'r',w:5}],porchF:1,porchB:1,porchS:1,doorsAll:true,
+    ov2:3.0,type:'pyr',slope:0.85,lift:1.0,s:0.75,beasts:5});
+  // Rear hall: double-eaved hip-and-gable roof.
+  hall({x:0,y:TY,z:-86,nx:9,nz:4,bx:4.8,bz:4.6,colR:0.4,colH:6.4,platH:0.9,platExt:2.2,
+    stairs:[{side:'f',w:12},{side:'b',w:6}],porchF:1,backDoor:true,double:true,ov1:3.2,ins:4.6,ov2:3.4,
+    type:'xie',slope:0.74,lift:1.1,s:0.85,beasts:5,plaque:true});
+
+  // Front gate and rear gate, set in the enclosure wall.
+  const gPX=9*4.6/2+2.6;
+  hall({x:0,y:0,z:ZWS,nx:9,nz:4,bx:4.6,bz:3.6,colR:0.38,colH:5.8,platH:2.0,platExt:2.6,xumi:true,balu:true,
+    stairs:[{side:'f',w:14,ramp:true,run:4.4},{side:'b',w:14,ramp:true,run:4.4}],gate:true,gateDoors:3,
+    cuts:[[gPX-1,gPX+1,-1.4,1.4],[-gPX-1,-gPX+1,-1.4,1.4]],double:true,ov1:3.0,ins:3.6,ov2:3.2,
+    type:'xie',slope:0.74,lift:1.1,s:0.85,beasts:5,plaque:true});
+  hall({x:0,y:0,z:ZWN,rot:Math.PI,nx:5,nz:2,bx:4.4,bz:4.0,colR:0.32,colH:5.0,platH:1.2,platExt:2.2,
+    stairs:[{side:'f',w:8},{side:'b',w:8}],gate:true,gateDoors:1,ov2:2.8,type:'xie',slope:0.74,lift:0.9,s:0.7,beasts:3});
+
+  // Side halls facing the front court.
+  for(const g of [-1,1])
+    hall({x:g*84,y:0,z:74,rot:-g*Math.PI/2,nx:9,nz:4,bx:4.2,bz:3.4,colR:0.32,colH:5.0,platH:1.6,platExt:2.2,xumi:true,balu:true,
+      stairs:[{side:'f',w:9}],porchF:1,double:true,ov1:2.8,ins:3.4,ov2:3.0,type:'hip',slope:0.7,lift:1.0,s:0.75,beasts:5});
+
+  // Enclosure wall and corner towers.
+  const WH=7,WT=1.6;
+  wall(-XW,ZWS,-9*4.6/2,ZWS,WH,WT);wall(9*4.6/2,ZWS,XW,ZWS,WH,WT);
+  wall(-XW,ZWN,-11,ZWN,WH,WT);wall(11,ZWN,XW,ZWN,WH,WT);
+  wall(-XW,ZWN,-XW,ZWS,WH,WT);wall(XW,ZWN,XW,ZWS,WH,WT);
+  for(const gx of [-1,1])for(const z of [ZWN,ZWS]){
+    box(gx*XW,0.7,z,14,1.4,14,STONE,M_PLAIN);box(gx*XW,5.2,z,13.4,7.6,13.4,RED,M_PLAIN);box(gx*XW,9.15,z,14,0.3,14,MARBLE,M_MARBLE);
+    hall({x:gx*XW,y:9.3,z,nx:3,nz:3,bx:3,bz:3,colR:0.24,colH:3.6,platH:0.3,platExt:1.3,doorsAll:true,double:true,
+      ov1:2.2,ins:2.0,ov2:2.4,type:'pyr',slope:0.9,lift:0.8,s:0.6,beasts:3});
+  }
+
+  // Bronze censers and gilded water vats on the terrace and in the court.
+  for(const g of [-1,1]){
+    censer(g*13,TY,9);censer(g*13,TY,21);vat(g*24,TY,3);vat(g*33,TY,-10);
+    vat(g*20,0,56);vat(g*20,0,92);censer(g*46,TY,-58);
+  }
+
+  // Cypress and pine groves outside the walls.
+  const rnd=mulberry32(1368);let placed=0,tries=0;
+  while(placed<280&&tries<8000){
+    tries++;
+    const x=(rnd()*2-1)*340,z=(rnd()*2-1)*380-10;
+    if(Math.abs(x)<XW+16&&z>ZWN-24&&z<ZWS+28)continue;
+    if(Math.abs(x)<18&&z>ZWS)continue;
+    tree(x,z,8+rnd()*8,0.8+rnd()*0.6,[0.10+rnd()*0.06,0.22+rnd()*0.10,0.11+rnd()*0.05]);placed++;
+  }
+}
+
+// ---------------------------------------------------------------- shaders
+const GLSL_COMMON=`
+const vec3 FOG=vec3(0.62,0.70,0.80);
+float hash(vec2 p){vec3 p3=fract(vec3(p.xyx)*0.1031);p3+=dot(p3,p3.yzx+33.33);return fract((p3.x+p3.y)*p3.z);}
+float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);
+  return mix(mix(hash(i),hash(i+vec2(1.0,0.0)),f.x),mix(hash(i+vec2(0.0,1.0)),hash(i+vec2(1.0,1.0)),f.x),f.y);}
+float fbm(vec2 p){float a=0.5,s=0.0;for(int i=0;i<4;i++){s+=a*noise(p);p=p*2.03+17.0;a*=0.5;}return s;}
+vec3 tone(vec3 c){c*=0.78;return clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14),0.0,1.0);}
+`;
+const VS=`#version 300 es
+layout(location=0) in vec3 aPos;layout(location=1) in vec3 aNor;layout(location=2) in vec3 aCol;layout(location=3) in vec3 aUVM;
+uniform mat4 uVP;
+out vec3 vPos;out vec3 vNor;out vec3 vCol;out vec2 vUV;flat out int vMat;
+void main(){vPos=aPos;vNor=aNor;vCol=aCol;vUV=aUVM.xy;vMat=int(aUVM.z+0.5);gl_Position=uVP*vec4(aPos,1.0);}`;
+const FS=`#version 300 es
+precision highp float;precision highp int;precision highp sampler2DShadow;
+in vec3 vPos;in vec3 vNor;in vec3 vCol;in vec2 vUV;flat in int vMat;
+uniform vec3 uEye;uniform vec3 uSun;uniform mat4 uLightVP;uniform sampler2DShadow uShadow;uniform float uTexel;
+out vec4 outColor;
+${GLSL_COMMON}
+const vec3 GOLD=vec3(0.96,0.72,0.22),BLUE=vec3(0.10,0.25,0.60),GREEN=vec3(0.10,0.46,0.34),DRED=vec3(0.55,0.09,0.06);
+float shadowAt(vec3 P,vec3 N){
+  vec4 lp=uLightVP*vec4(P+N*0.16,1.0);vec3 q=lp.xyz*0.5+0.5;
+  if(q.x<0.0||q.x>1.0||q.y<0.0||q.y>1.0||q.z>1.0)return 1.0;
+  float s=0.0;
+  for(int i=-1;i<=1;i++)for(int j=-1;j<=1;j++)s+=texture(uShadow,vec3(q.xy+vec2(float(i),float(j))*uTexel*1.3,q.z-0.00018));
+  return s/9.0;
+}
+void main(){
+  vec2 dux=dFdx(vUV),duy=dFdy(vUV),fwUV=abs(dux)+abs(duy);
+  vec3 dpx=dFdx(vPos),dpy=dFdy(vPos);vec2 fwP=abs(dpx.xz)+abs(dpy.xz);
+  vec3 N=normalize(vNor),V=normalize(uEye-vPos);
+  bool back=(vMat==1)?!gl_FrontFacing:dot(N,V)<0.0;
+  if(back)N=-N;
+  vec3 Ng=N,alb=vCol,specCol=vec3(1.0);float spec=0.03,shin=20.0;
+
+  if(vMat==1){                                   // glazed roof tiles
+    float q=vUV.x/0.46,fade=clamp(1.0-fwUV.x/0.46*1.3,0.0,1.0),cs=cos(6.2831853*q);
+    if(!back){
+      float det=dux.x*duy.y-duy.x*dux.y;vec3 T=(dpx*duy.y-dpy*dux.y)*sign(det);float tl=length(T);
+      if(tl>1e-8)N=normalize(N+T/tl*(0.5*sin(6.2831853*q)*fade));
+      alb=vCol*mix(0.84,0.58+0.42*smoothstep(-0.7,0.6,cs),fade);
+      float rf=clamp(1.0-fwUV.y/0.5*1.5,0.0,1.0);
+      alb*=1.0-0.16*rf*smoothstep(0.8,1.0,fract(vUV.y/0.5));
+      alb*=0.90+0.18*noise(vUV*0.6);
+      spec=0.4;shin=48.0;
+    }else{                                       // painted rafters under the eaves
+      alb=mix(vec3(0.30,0.20,0.14),mix(vec3(0.10,0.30,0.24),vec3(0.56,0.12,0.08),smoothstep(-0.2,0.2,cs)),fade);
+    }
+  }else if(vMat==2){                             // white marble
+    alb=vCol*(0.92+0.10*(noise(vPos.xz*0.9+vPos.y*2.3)*0.6+noise(vPos.xz*4.0+vPos.y*7.0)*0.4));
+    if(N.y>0.9){
+      vec2 g=vPos.xz/1.6,f2=abs(fract(g)-0.5);float fw=max(fwP.x,fwP.y)/1.6,e=0.5-max(f2.x,f2.y);
+      alb*=1.0-0.22*(1.0-smoothstep(0.0,0.012+fw,e))*min(1.0,0.03/(0.012+fw));
+    }
+    spec=0.10;shin=30.0;
+  }else if(vMat==3){                             // grey brick paving
+    vec2 g=vPos.xz/vec2(1.6,0.8);g.x+=0.5*mod(floor(g.y),2.0);
+    vec2 id=floor(g),f2=abs(fract(g)-0.5);float fw=max(fwP.x/1.6,fwP.y/0.8),fade=clamp(1.0-fw*2.0,0.0,1.0);
+    float ln=1.0-smoothstep(0.0,0.03+fw,0.5-max(f2.x,f2.y));
+    alb=vCol*mix(1.0,(0.91+0.18*hash(id))*(1.0-0.3*ln),fade)*(0.88+0.24*fbm(vPos.xz*0.035));
+  }else if(vMat==4){                             // painted architrave: blue-green panels, gold lines
+    float q=vUV.x,f=fract(q),id=floor(q),d=abs(f-0.5),y=vUV.y,fade=clamp(1.0-fwUV.x*4.0,0.0,1.0);
+    bool alt=mod(id,2.0)<0.5;vec3 c1=alt?BLUE:GREEN,c2=alt?GREEN:BLUE,c=d<0.2?c1:(d<0.44?c2:c1);
+    if(d>0.2&&d<0.44&&abs(fract((d+abs(y-0.5)*0.10)*22.0)-0.5)<0.14)c=mix(c,vec3(0.92),0.55);
+    if(min(abs(d-0.2),abs(d-0.44))<0.008)c=GOLD;
+    if(d<0.2&&length(vec2((f-0.5)*4.2,(y-0.5)*1.6))<0.42)c=GOLD;
+    if(y<0.1||y>0.9)c=GOLD*0.9;
+    alb=mix(mix(BLUE,GREEN,0.5)*1.05,c,fade);
+  }else if(vMat==5){                             // bracket sets (dougong)
+    float q=vUV.x,f=fract(q),id=floor(q),d=abs(f-0.5),y=clamp(vUV.y,0.0,0.999),fade=clamp(1.0-fwUV.x*2.5,0.0,1.0);
+    float tier=floor(y*3.0),fy=fract(y*3.0),hwid=0.14+0.11*tier;vec3 c=vec3(0.26,0.06,0.05);
+    if(d<hwid){
+      c=mod(id+tier,2.0)<0.5?BLUE:GREEN;
+      if(fy>0.80||d>hwid-0.03)c=GOLD*0.85;
+      if(fy<0.14)c*=0.5;
+    }
+    alb=mix(mix(BLUE,GREEN,0.5)*0.72,c,fade);
+  }else if(vMat==6){                             // lattice doors; vCol = (height, leaf width)
+    float Hh=vCol.x,lw=vCol.y,f=fract(vUV.x),y=vUV.y/Hh,ex=min(f,1.0-f)*lw;vec3 c=DRED;
+    if(ex<0.07)c=DRED*0.78;
+    else if(y<0.28){
+      float r=length(vec2((f-0.5)*lw,(vUV.y-0.14*Hh)*0.55));c=DRED*0.95;
+      if(abs(r-0.26)<0.035||r<0.09)c=GOLD;
+    }else if(y<0.36){c=DRED*0.82;if(abs(y-0.32)<0.012&&ex>0.15)c=GOLD;}
+    else if(y<0.95){
+      vec2 g=vec2((f-0.5)*lw,vUV.y)/0.17;float lfade=clamp(1.0-(fwUV.x*lw+fwUV.y)/0.17*1.2,0.0,1.0);
+      float a=abs(fract(g.x+g.y)-0.5),b=abs(fract(g.x-g.y)-0.5);
+      vec3 bar=vec3(0.74,0.52,0.20),hole=vec3(0.07,0.04,0.03);
+      c=mix(mix(hole,bar,0.5),max(a,b)>0.36?bar:hole,lfade);
+    }else c=DRED*0.8;
+    alb=c;
+  }else if(vMat==7){                             // round tile ends and drip tiles along the eave
+    float q=vUV.x/0.46,f=fract(q+0.5)-0.5,fade=clamp(1.0-fwUV.x/0.46*1.4,0.0,1.0);
+    float r=length(vec2(f*0.46,(vUV.y-0.42)*0.34));vec3 c=vCol*0.5;
+    if(r<0.14)c=vCol*1.05;else if(vUV.y>0.2&&abs(fract(q)-0.5)<(1.0-vUV.y)*0.42)c=vCol*0.8;
+    if(r<0.06)c=vCol*0.68;
+    alb=mix(vCol*0.74,c,fade);spec=0.4;shin=48.0;
+  }else if(vMat==8){                             // name plaque
+    vec2 u=vUV;float e=min(min(u.x,1.0-u.x)*0.62,min(u.y,1.0-u.y));vec3 c=vec3(0.06,0.13,0.42);
+    if(e<0.06)c=GOLD;
+    else if(u.y>0.12&&u.y<0.88){
+      float gi=floor((u.y-0.12)/0.76*3.0);vec2 g=vec2((u.x-0.5)/0.27,(fract((u.y-0.12)/0.76*3.0)-0.5)/0.38);
+      if(abs(g.x)<1.0&&abs(g.y)<1.0&&hash(floor((g*0.5+0.5)*5.0)+gi*7.3)>0.42)c=GOLD;
+    }
+    alb=c;
+  }else if(vMat==9){                             // gilding
+    alb=vCol*0.8;specCol=vCol*1.4;spec=1.0;shin=36.0;
+  }else if(vMat==10){                            // vermilion gate leaves with gilt studs
+    float Hh=vCol.x,lw=vCol.y,f=fract(vUV.x),y=vUV.y/Hh;vec3 c=vec3(0.60,0.07,0.05);
+    vec2 g=vec2(f*9.0,y*9.0),m=(fract(g)-0.5)*vec2(lw/9.0,Hh/9.0);
+    float sfade=clamp(1.0-(fwUV.x*9.0)*1.5,0.0,1.0);
+    if(y>0.05&&y<0.95&&f>0.04&&f<0.96)c=mix(mix(c,GOLD,0.10),length(m)<0.06?GOLD:c,sfade);
+    if(min(f,1.0-f)*lw<0.03)c*=0.5;
+    alb=c;spec=0.15;
+  }else if(vMat==11){                            // ground outside the walls
+    alb=vCol*(0.72+0.5*fbm(vPos.xz*0.05))*(0.92+0.16*noise(vPos.xz*1.7));
+  }else if(vMat==12){                            // foliage
+    alb=vCol*(0.78+0.44*noise(vPos.xz*1.5+vPos.y*2.0));
+  }else if(vMat==13){                            // plain glazed ceramic / bronze
+    spec=0.45;shin=44.0;
+  }else if(vMat==14){                            // carved cloud-and-dragon ramp
+    float n=fbm(vUV*1.6),sw=sin(vUV.x*3.0+5.0*n)*sin(vUV.y*2.4+4.0*fbm(vUV*0.9+7.0));
+    alb=vCol*(0.80+0.24*smoothstep(-0.3,0.3,sw));spec=0.1;
+  }
+
+  alb=pow(max(alb,0.0),vec3(2.2));
+  float ndl=max(dot(N,uSun),0.0),sh=shadowAt(vPos,Ng);
+  vec3 skyC=vec3(0.44,0.57,0.82),gndC=vec3(0.42,0.36,0.28),sun=vec3(1.0,0.94,0.82)*2.2;
+  vec3 amb=mix(gndC*0.55,skyC*0.85,N.y*0.5+0.5)*(0.70+0.30*sh);
+  vec3 c=alb*(amb+sun*ndl*sh);
+  float sp=pow(max(dot(N,normalize(uSun+V)),0.0),shin)*spec*sh*step(0.0,dot(Ng,uSun));
+  c+=specCol*sun*sp;
+  c+=skyC*specCol*pow(1.0-max(dot(N,V),0.0),4.0)*spec*0.35;
+  float dist=length(uEye-vPos);
+  c=mix(c,FOG,1.0-exp(-pow(dist/1500.0,1.7)));
+  outColor=vec4(pow(tone(c),vec3(1.0/2.2)),1.0);
+}`;
+const VS_SHADOW=`#version 300 es
+layout(location=0) in vec3 aPos;uniform mat4 uVP;void main(){gl_Position=uVP*vec4(aPos,1.0);}`;
+const FS_SHADOW=`#version 300 es
+precision mediump float;void main(){}`;
+const VS_SKY=`#version 300 es
+out vec2 vNdc;void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2))*2.0-1.0;vNdc=p;gl_Position=vec4(p,1.0,1.0);}`;
+const FS_SKY=`#version 300 es
+precision highp float;
+in vec2 vNdc;uniform vec3 uR;uniform vec3 uU;uniform vec3 uF;uniform vec3 uSun;out vec4 outColor;
+${GLSL_COMMON}
+void main(){
+  vec3 d=normalize(uF+vNdc.x*uR+vNdc.y*uU);
+  vec3 c=mix(FOG,vec3(0.13,0.33,0.76),pow(max(d.y,0.0),0.5));
+  float sd=max(dot(d,uSun),0.0);
+  c+=vec3(1.0,0.86,0.62)*(pow(sd,900.0)*8.0+pow(sd,10.0)*0.22);
+  if(d.y>0.0){
+    vec2 q=d.xz/(d.y+0.14)*0.85;
+    float cl=smoothstep(0.56,0.86,fbm(q+vec2(3.1,1.7)))*smoothstep(0.0,0.22,d.y);
+    c=mix(c,vec3(1.22,1.20,1.16),cl*0.7);
+  }
+  outColor=vec4(pow(tone(c),vec3(1.0/2.2)),1.0);
+}`;
+
+// ---------------------------------------------------------------- renderer
+const canvas=document.getElementById('c');
+const gl=canvas.getContext('webgl2',{antialias:true,alpha:false,powerPreference:'high-performance'});
+const VIEWS={
+  home:{az:-0.62,el:0.30,dist:300,tx:0,ty:14,tz:-12},
+  front:{az:0,el:0.13,dist:250,tx:0,ty:15,tz:-12},
+  corner:{az:0.78,el:0.24,dist:230,tx:0,ty:14,tz:-20},
+  aerial:{az:-0.45,el:0.95,dist:400,tx:0,ty:0,tz:-12},
+  eaves:{az:-0.5,el:-0.07,dist:42,tx:8,ty:13.5,tz:-4},
+};
+const cam=Object.assign({},VIEWS.home),goal=Object.assign({},VIEWS.home);
+let autoRotate=true,dirty=true;
+
+function fail(msg){const e=document.getElementById('err');e.textContent=msg;e.style.display='flex';}
+function program(vs,fs){
+  const p=gl.createProgram();
+  for(const [type,src] of [[gl.VERTEX_SHADER,vs],[gl.FRAGMENT_SHADER,fs]]){
+    const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);
+    if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));
+    gl.attachShader(p,s);
+  }
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+function start(){
+  buildScene();
+  const pMain=program(VS,FS),pShadow=program(VS_SHADOW,FS_SHADOW),pSky=program(VS_SKY,FS_SKY);
+  const U=(p,n)=>gl.getUniformLocation(p,n);
+  const vao=gl.createVertexArray();gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER,gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER,VB.subarray(0,VN*STRIDE),gl.STATIC_DRAW);
+  for(let i=0;i<4;i++){gl.enableVertexAttribArray(i);gl.vertexAttribPointer(i,3,gl.FLOAT,false,STRIDE*4,i*12);}
+  const skyVao=gl.createVertexArray();
+  VB=null;
+
+  // The sun never moves, so the shadow map is rendered once.
+  const SUN=norm([0.50,0.68,0.54]),CENTER=[0,0,-13],SR=215;
+  const lightVP=mul(ortho(-SR,SR,-SR,SR,280,740),lookAt([CENTER[0]+SUN[0]*500,SUN[1]*500,CENTER[2]+SUN[2]*500],CENTER,[0,1,0]));
+  const SS=Math.min(4096,gl.getParameter(gl.MAX_TEXTURE_SIZE));
+  const shadowTex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,shadowTex);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.DEPTH_COMPONENT24,SS,SS,0,gl.DEPTH_COMPONENT,gl.UNSIGNED_INT,null);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_COMPARE_MODE,gl.COMPARE_REF_TO_TEXTURE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_COMPARE_FUNC,gl.LEQUAL);
+  const fbo=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.TEXTURE_2D,shadowTex,0);
+  gl.drawBuffers([gl.NONE]);gl.readBuffer(gl.NONE);
+  gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);
+  gl.viewport(0,0,SS,SS);gl.clear(gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.POLYGON_OFFSET_FILL);gl.polygonOffset(1.5,2.0);
+  gl.useProgram(pShadow);gl.uniformMatrix4fv(U(pShadow,'uVP'),false,lightVP);
+  gl.bindVertexArray(vao);gl.drawArrays(gl.TRIANGLES,0,VN);
+  gl.disable(gl.POLYGON_OFFSET_FILL);gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+
+  gl.useProgram(pMain);
+  gl.uniform3fv(U(pMain,'uSun'),SUN);gl.uniformMatrix4fv(U(pMain,'uLightVP'),false,lightVP);
+  gl.uniform1i(U(pMain,'uShadow'),0);gl.uniform1f(U(pMain,'uTexel'),1/SS);
+  const uVP=U(pMain,'uVP'),uEye=U(pMain,'uEye');
+  gl.useProgram(pSky);gl.uniform3fv(U(pSky,'uSun'),SUN);
+  const uR=U(pSky,'uR'),uU=U(pSky,'uU'),uF=U(pSky,'uF');
+
+  function resize(){
+    const dpr=Math.min(window.devicePixelRatio||1,2),w=Math.round(canvas.clientWidth*dpr),h=Math.round(canvas.clientHeight*dpr);
+    if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;return true;}
+    return false;
+  }
+  function draw(){
+    const asp=canvas.width/canvas.height,fov=40*Math.PI/180,th=Math.tan(fov/2),ce=Math.cos(cam.el);
+    const eye=[cam.tx+cam.dist*ce*Math.sin(cam.az),Math.max(1.2,cam.ty+cam.dist*Math.sin(cam.el)),cam.tz+cam.dist*ce*Math.cos(cam.az)];
+    const view=lookAt(eye,[cam.tx,cam.ty,cam.tz],[0,1,0]);
+    const vp=mul(persp(fov,asp,clamp(cam.dist*0.01,0.5,4),14000),view);
+    gl.viewport(0,0,canvas.width,canvas.height);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.disable(gl.DEPTH_TEST);gl.depthMask(false);
+    gl.useProgram(pSky);
+    gl.uniform3f(uR,view[0]*th*asp,view[4]*th*asp,view[8]*th*asp);
+    gl.uniform3f(uU,view[1]*th,view[5]*th,view[9]*th);
+    gl.uniform3f(uF,-view[2],-view[6],-view[10]);
+    gl.bindVertexArray(skyVao);gl.drawArrays(gl.TRIANGLES,0,3);
+    gl.enable(gl.DEPTH_TEST);gl.depthMask(true);
+    gl.useProgram(pMain);
+    gl.uniformMatrix4fv(uVP,false,vp);gl.uniform3fv(uEye,eye);
+    gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,shadowTex);
+    gl.bindVertexArray(vao);gl.drawArrays(gl.TRIANGLES,0,VN);
+  }
+  let last=performance.now();
+  function frame(now){
+    const dt=Math.min(0.05,(now-last)/1000);last=now;
+    if(autoRotate)goal.az+=dt*0.07;
+    const k=1-Math.exp(-dt*10);
+    for(const key in cam){const d=goal[key]-cam[key];if(Math.abs(d)>1e-5){cam[key]+=d*k;dirty=true;}}
+    if(resize())dirty=true;
+    if(dirty){draw();dirty=false;}
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------- controls
+function setAuto(on){autoRotate=on;document.getElementById('auto').classList.toggle('on',on);}
+function goTo(v){
+  Object.assign(goal,v);
+  goal.az=v.az+Math.round((cam.az-v.az)/(2*Math.PI))*2*Math.PI;   // take the short way round
+}
+function pan(dx,dy){
+  const k=goal.dist*0.0014,ca=Math.cos(goal.az),sa=Math.sin(goal.az);
+  goal.tx=clamp(goal.tx-ca*dx*k-sa*dy*k,-160,160);
+  goal.tz=clamp(goal.tz+sa*dx*k-ca*dy*k,-200,180);
+}
+function bindControls(){
+  const ptrs=new Map();let pinch=0;
+  const spread=()=>{const p=[...ptrs.values()];return Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y);};
+  canvas.addEventListener('pointerdown',e=>{
+    canvas.setPointerCapture(e.pointerId);
+    ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY,pan:e.button!==0||e.shiftKey});
+    if(ptrs.size===2)pinch=spread();
+    setAuto(false);canvas.classList.add('drag');
+  });
+  canvas.addEventListener('pointermove',e=>{
+    const p=ptrs.get(e.pointerId);if(!p)return;
+    const dx=e.clientX-p.x,dy=e.clientY-p.y;p.x=e.clientX;p.y=e.clientY;
+    if(ptrs.size===1){
+      if(p.pan)pan(dx,dy);
+      else{goal.az-=dx*0.006;goal.el=clamp(goal.el+dy*0.005,-0.12,1.5);}
+    }else if(ptrs.size===2){
+      const d=spread();
+      if(pinch>0&&d>0)goal.dist=clamp(goal.dist*pinch/d,25,900);
+      pinch=d;pan(dx*0.5,dy*0.5);
+    }
+  });
+  const release=e=>{ptrs.delete(e.pointerId);pinch=0;if(!ptrs.size)canvas.classList.remove('drag');};
+  canvas.addEventListener('pointerup',release);canvas.addEventListener('pointercancel',release);
+  canvas.addEventListener('wheel',e=>{
+    e.preventDefault();
+    const d=e.deltaMode===1?e.deltaY*32:e.deltaY;
+    goal.dist=clamp(goal.dist*Math.exp(d*0.0012),25,900);
+  },{passive:false});
+  canvas.addEventListener('contextmenu',e=>e.preventDefault());
+  canvas.addEventListener('dblclick',()=>goTo(VIEWS.home));
+  for(const b of document.querySelectorAll('#views button[data-view]'))
+    b.addEventListener('click',()=>{setAuto(false);goTo(VIEWS[b.dataset.view]);});
+  document.getElementById('auto').addEventListener('click',()=>setAuto(!autoRotate));
+  canvas.addEventListener('webglcontextlost',e=>e.preventDefault());
+  canvas.addEventListener('webglcontextrestored',()=>location.reload());
+}
+
+if(!gl)fail('此浏览器不支持 WebGL 2，无法显示三维宫殿。\nThis browser does not support WebGL 2.');
+else{
+  try{start();bindControls();}
+  catch(err){fail('渲染初始化失败 / Failed to start the renderer:\n'+err.message);throw err;}
+}
+</script>
+</body>
+</html>

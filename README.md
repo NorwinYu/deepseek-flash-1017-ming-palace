@@ -17,16 +17,16 @@
 
 这是对明代官式建筑的风格化演绎，并非测绘级或考古级复原。
 
-## 两版对比
+## 三版对比
 
-同一题目的另一次生成，用的是本地 Maya 服务的 DeepSeek V4.1 Flash，发布于 `local/`：
+同一道题目的三次生成：根目录是线上的 DeepSeek Flash 1017，`local/` 是本地 Maya 服务的 DeepSeek V4.1 Flash，`fable/` 是 Fable 5.2 从零写的新单文件。
 
-| | 本版（根目录） | 本地版（`local/`） |
-|---|---|---|
-| 模型 | DeepSeek Flash 1017 | DeepSeek V4.1 Flash（maya） |
-| 日期 | 2026-11-13 | 2026-11-06 |
-| 体积 | 85,402 字节 | 91,195 字节 |
-| 在线 | [本版](https://norwinyu.github.io/deepseek-flash-1017-ming-palace/) | [local/](https://norwinyu.github.io/deepseek-flash-1017-ming-palace/local/) |
+| | 本版（根目录） | 本地版（`local/`） | Fable 版（`fable/`） |
+|---|---|---|---|
+| 模型 | DeepSeek Flash 1017 | DeepSeek V4.1 Flash（maya） | Fable 5.2 |
+| 日期 | 2026-11-13 | 2026-11-06 | 2026-11-17 |
+| 体积 | 85,402 字节 | 91,195 字节 | 47,439 字节 |
+| 在线 | [本版](https://norwinyu.github.io/deepseek-flash-1017-ming-palace/) | [local/](https://norwinyu.github.io/deepseek-flash-1017-ming-palace/local/) | [fable/](https://norwinyu.github.io/deepseek-flash-1017-ming-palace/fable/) |
 
 并排拖动对比：[中文](https://norwinyu.github.io/blog/two-taihe-halls.html) · [English](https://norwinyu.github.io/en/blog/two-taihe-halls.html)
 
